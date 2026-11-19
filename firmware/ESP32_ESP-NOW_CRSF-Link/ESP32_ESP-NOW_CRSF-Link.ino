@@ -79,7 +79,7 @@
 #include <freertos/queue.h>
 #include "link_types.h"
 
-#define FW_VERSION "0.2.0"
+#define FW_VERSION "0.2.1"
 
 // ── Pins je Chip ──────────────────────────────────────────────────────
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -188,10 +188,13 @@ static uint8_t myMac[6];
 
 struct Counters {
     uint32_t uartIn, uartOut, crcErr, rcUart, rcRadio, sendErr, txPkts, queueFull, rcStale, noAck;
+    // v0.2.1: Gesamtzaehler fuer Antworten (alles ausser Kanal-Frames)
+    uint32_t dataRx, crcRadio, lenErr, otherOut, otherIn;
 };
 static Counters cnt, cntSec, cntLast;   // gesamt, Stand der letzten Sekunde, Rate
 static uint32_t lastRcRadioMs = 0, lastRcUartMs = 0, lastRcSentMs = 0;
 static uint16_t txSeq = 0;
+static uint8_t lastOtherType = 0, lastOtherLen = 0;   // v0.2.1: letztes Nicht-Kanal-Frame aufs Kabel
 
 static Peer* findPeer(const uint8_t* mac, bool create) {
     for (auto& p : peers) if (p.used && memcmp(p.mac, mac, 6) == 0) return &p;
@@ -287,6 +290,7 @@ static void radioSendFrame(const uint8_t* f, uint8_t flen) {
 
 static void onUartFrame(const uint8_t* f, uint8_t flen) {
     cnt.uartIn++;
+    if (f[2] != 0x16) cnt.otherIn++;
     if (f[2] == 0x16) {                        // RC Channels Packed
         cnt.rcUart++;
         uint32_t now = millis();
@@ -370,8 +374,9 @@ static void handleRadio(const RxItem& it) {
         }
         p->haveSeq = true; p->lastSeq = h->seq; p->lastMs = now;
         p->rx++; p->rxSec++;
-        if (blen < 4 || blen > 64 || body[1] + 2 != blen) break;
-        if (crc8_d5(body + 2, body[1] - 1) != body[blen - 1]) { cnt.crcErr++; break; }
+        cnt.dataRx++;
+        if (blen < 4 || blen > 64 || body[1] + 2 != blen) { cnt.lenErr++; break; }
+        if (crc8_d5(body + 2, body[1] - 1) != body[blen - 1]) { cnt.crcErr++; cnt.crcRadio++; break; }
         // Rueckstau: liegen schon neuere Pakete in der Warteschlange, ist
         // dieses Kanal-Frame veraltet -> nicht mehr aufs Kabel (sonst
         // laeuft die Verzoegerung auf). Andere Frames (Lua, Telemetrie)
@@ -379,6 +384,7 @@ static void handleRadio(const RxItem& it) {
         if (body[2] == 0x16 && uxQueueMessagesWaiting(rxQueue) > 2) { cnt.rcStale++; lastRcRadioMs = now; break; }
         Serial1.write(body, blen);
         cnt.uartOut++;
+        if (body[2] != 0x16) { cnt.otherOut++; lastOtherType = body[2]; lastOtherLen = (uint8_t)blen; }
         if (body[2] == 0x16) { cnt.rcRadio++; lastRcRadioMs = now; }
         break;
     }
@@ -498,7 +504,7 @@ $('ver').textContent='v'+s.ver;$('nm').textContent=s.name||'ESP-NOW-CRSF-Link';$
 $('st').innerHTML=s.link?'<span class="ok">Funk-Verbindung da</span>':'<span class="bad">keine Funk-Verbindung</span>';
 $('own').innerHTML=row('Kanal-Frames vom Kabel /s',s.rcUart)+row('Kanal-Frames aus Funk /s',s.rcRadio)+
 row('Frames Kabel → Funk /s',s.uartIn)+row('Frames Funk → Kabel /s',s.uartOut)+row('Gesendete Pakete /s',s.tx)+
-row('CRC-Fehler gesamt',s.crcErr)+row('Sendefehler gesamt',s.sendErr)+row('Nicht zugestellt (keine Quittung) gesamt',s.noAck)+row('Warteschlange voll gesamt',s.qFull)+row('Veraltete Kanal-Frames verworfen',s.stale)+row('Laufzeit',s.up+' s');
+row('CRC-Fehler gesamt',s.crcErr)+row('Sendefehler gesamt',s.sendErr)+row('Nicht zugestellt (keine Quittung) gesamt',s.noAck)+row('Warteschlange voll gesamt',s.qFull)+row('Veraltete Kanal-Frames verworfen',s.stale)+row('Datenpakete aus Funk gesamt',s.dataRx)+row('davon Länge falsch / CRC falsch',s.lenErr+' / '+s.crcRadio)+row('Antworten Funk → Kabel gesamt (ohne Kanäle)',s.otherOut+(s.otherOut?' (zuletzt Typ 0x'+s.lastType.toString(16).toUpperCase()+', '+s.lastLen+' Byte)':''))+row('Anfragen Kabel → Funk gesamt (ohne Kanäle)',s.otherIn)+row('Laufzeit',s.up+' s');
 let h='<tr><th>Gegenstelle</th><th>Pakete/s</th><th>verloren</th><th>Aussetzer &gt;200ms</th><th>l&auml;ngste L&uuml;cke</th><th>Laufzeit (eine Richtung)</th><th>RSSI</th></tr>';
 for(const p of s.peers){h+='<tr><td>'+(p.name?'<b>'+p.name+'</b> ':'')+p.mac.slice(-5)+(p.alive?'':' <span class="bad">weg</span>')+'</td><td>'+p.rx+'</td><td>'+p.lost+' ('+p.lossPct+' %)</td><td>'+p.drop+
 '</td><td>'+p.gapSec+' / '+p.maxGap+' ms</td><td>'+(p.rtt/2000).toFixed(2)+' ms (max '+(p.rttMax/2000).toFixed(2)+')</td><td>'+p.rssi+' dBm</td></tr>'}
@@ -523,6 +529,9 @@ static void handleStats() {
     j += ",\"uartIn\":" + String(cntLast.uartIn) + ",\"uartOut\":" + String(cntLast.uartOut);
     j += ",\"tx\":" + String(cntLast.txPkts) + ",\"crcErr\":" + String(cnt.crcErr) + ",\"sendErr\":" + String(cnt.sendErr);
     j += ",\"qFull\":" + String(cnt.queueFull) + ",\"stale\":" + String(cnt.rcStale) + ",\"noAck\":" + String(cnt.noAck);
+    j += ",\"dataRx\":" + String(cnt.dataRx) + ",\"crcRadio\":" + String(cnt.crcRadio) + ",\"lenErr\":" + String(cnt.lenErr);
+    j += ",\"otherIn\":" + String(cnt.otherIn) + ",\"otherOut\":" + String(cnt.otherOut);
+    j += ",\"lastType\":" + String(lastOtherType) + ",\"lastLen\":" + String(lastOtherLen);
     j += ",\"up\":" + String(upSec) + ",\"peers\":[";
     bool first = true;
     for (auto& p : peers) {

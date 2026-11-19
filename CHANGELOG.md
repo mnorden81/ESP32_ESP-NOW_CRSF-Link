@@ -2,6 +2,9 @@
 
 Bis v0.1.9 „Funk-Brücke“, Prüfstand im Repo RC-CRSF-Router-ESP32-S3 (`pruefstand/Funk_Bruecke/`). Neueste Version oben.
 
+## v0.2.1
+- Fehlersuche Rückweg: Status zeigt Gesamtzähler „Datenpakete aus Funk“, „Länge falsch / CRC falsch“, „Antworten Funk → Kabel (ohne Kanäle)“ mit Typ und Länge des letzten Frames, „Anfragen Kabel → Funk (ohne Kanäle)“.
+
 ## v0.2.0
 - Eigenes Projekt und Repo „ESP32_ESP-NOW_CRSF-Link“. Sketch `firmware/ESP32_ESP-NOW_CRSF-Link/`.
 - WLAN-Name „CRSF-Link-XXXX“ bzw. „Link-<Name>“ (vorher „Funk-Bruecke-XXXX“ / „Funk-<Name>“).

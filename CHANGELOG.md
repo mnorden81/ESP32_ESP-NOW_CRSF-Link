@@ -3,6 +3,7 @@
 Bis v0.1.9 „Funk-Brücke“, Prüfstand im Repo RC-CRSF-Router-ESP32-S3 (`pruefstand/Funk_Bruecke/`). Neueste Version oben.
 
 ## v0.2.1
+- Hardware-Test 19.11.2026 bestanden: am Empfänger mit Multiswitch S3 v5.04 als Teilnehmer. Kanäle, Lua-Menü und WM-Befehle laufen über Funk.
 - Fehlersuche Rückweg: Status zeigt Gesamtzähler „Datenpakete aus Funk“, „Länge falsch / CRC falsch“, „Antworten Funk → Kabel (ohne Kanäle)“ mit Typ und Länge des letzten Frames, „Anfragen Kabel → Funk (ohne Kanäle)“.
 
 ## v0.2.0

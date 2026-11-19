@@ -1,6 +1,6 @@
 name: Firmware bauen
 
-# Baut ESP32_ESP_NOW_Link fuer ESP32-S3, ESP32-C3 und klassischen ESP32,
+# Baut ESP32_ESP-NOW_CRSF-Link fuer ESP32-S3, ESP32-C3 und klassischen ESP32,
 # jeweils mit esp32-Core 3.0.7 (wie die Modul-Firmware) und 3.3.12
 # (Arduino IDE).
 on:
@@ -36,13 +36,13 @@ jobs:
       - name: Kompilieren
         run: |
           arduino-cli compile --warnings default --fqbn "${{ matrix.fqbn }}" \
-            --output-dir build firmware/ESP32_ESP_NOW_Link
+            --output-dir build firmware/ESP32_ESP-NOW_CRSF-Link
           mkdir -p out
-          cp build/ESP32_ESP_NOW_Link.ino.bin        out/ESP32_ESP_NOW_Link_${{ matrix.chip }}_ota.bin
-          cp build/ESP32_ESP_NOW_Link.ino.merged.bin out/ESP32_ESP_NOW_Link_${{ matrix.chip }}_komplett.bin
+          cp build/ESP32_ESP-NOW_CRSF-Link.ino.bin        out/ESP32_ESP-NOW_CRSF-Link_${{ matrix.chip }}_ota.bin
+          cp build/ESP32_ESP-NOW_CRSF-Link.ino.merged.bin out/ESP32_ESP-NOW_CRSF-Link_${{ matrix.chip }}_komplett.bin
       - uses: actions/upload-artifact@v4
         if: matrix.core == '3.3.12'
         with:
-          name: esp-now-link-${{ matrix.chip }}
+          name: esp-now-crsf-link-${{ matrix.chip }}
           # *_komplett.bin = ab Adresse 0x0 per USB flashen, *_ota.bin = Update per WebUI
           path: out/*.bin

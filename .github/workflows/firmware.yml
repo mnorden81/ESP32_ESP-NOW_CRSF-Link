@@ -1,0 +1,48 @@
+name: Firmware bauen
+
+# Baut ESP32_ESP_NOW_Link fuer ESP32-S3, ESP32-C3 und klassischen ESP32,
+# jeweils mit esp32-Core 3.0.7 (wie die Modul-Firmware) und 3.3.12
+# (Arduino IDE).
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.chip }} (Core ${{ matrix.core }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        core: ["3.0.7", "3.3.12"]
+        chip: [s3, c3, esp32]
+        include:
+          - chip: s3
+            fqbn: "esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,FlashSize=4M,PartitionScheme=default"
+          - chip: c3
+            fqbn: "esp32:esp32:esp32c3:CDCOnBoot=cdc,FlashSize=4M,PartitionScheme=default"
+          - chip: esp32
+            fqbn: "esp32:esp32:esp32:FlashSize=4M,PartitionScheme=default"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: ESP32-Core installieren
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@${{ matrix.core }}
+      - name: Kompilieren
+        run: |
+          arduino-cli compile --warnings default --fqbn "${{ matrix.fqbn }}" \
+            --output-dir build firmware/ESP32_ESP_NOW_Link
+          mkdir -p out
+          cp build/ESP32_ESP_NOW_Link.ino.bin        out/ESP32_ESP_NOW_Link_${{ matrix.chip }}_ota.bin
+          cp build/ESP32_ESP_NOW_Link.ino.merged.bin out/ESP32_ESP_NOW_Link_${{ matrix.chip }}_komplett.bin
+      - uses: actions/upload-artifact@v4
+        if: matrix.core == '3.3.12'
+        with:
+          name: esp-now-link-${{ matrix.chip }}
+          # *_komplett.bin = ab Adresse 0x0 per USB flashen, *_ota.bin = Update per WebUI
+          path: out/*.bin

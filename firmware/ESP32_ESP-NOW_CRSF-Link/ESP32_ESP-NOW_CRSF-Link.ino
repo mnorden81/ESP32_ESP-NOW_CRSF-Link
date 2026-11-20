@@ -66,6 +66,12 @@
  *          zusaetzlich die Rolle "Bruecke" (RC_Common 1.5.0 funk_link,
  *          Multiswitch ab v5.01, CRSF-Router ab v0.4.0). Einstellungen
  *          aus v0.1.x bleiben erhalten.
+ *   0.2.1  Gesamtzaehler fuer den Rueckweg Funk -> Kabel (Diagnose)
+ *   0.3.0  Eigenes Lua-Menue am Sender (Ordner Funk, Gegenstellen, WLAN,
+ *          Global) mit eigener CRSF-Adresse 0xB0 + Lua-Nr - 1 (Auto: am
+ *          Empfaenger Nr 1, am Modul Nr 2). Kennung/Kanal im Lua nur
+ *          Anzeige. Firmware-Update per WLAN (OTA), Export/Import der
+ *          Einstellungen als Datei in der WebUI.
  */
 
 #include <WiFi.h>
@@ -77,9 +83,14 @@
 #include <esp_mac.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <Update.h>
 #include "link_types.h"
+#include "link_crsf.h"
+#include "lua_menu.h"
 
-#define FW_VERSION "0.2.1"
+#define FW_VERSION "0.3.0"
+// Parameter-Version im DEVICE_INFO: aendert sich mit jeder Firmware
+static const uint8_t FW_PARAM_VERSION = 30;
 
 // ── Pins je Chip ──────────────────────────────────────────────────────
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -116,6 +127,9 @@
 #define LINK_TIMEOUT_MS 200      // so lange ohne Funk-Paket = Aussetzer
 #define PING_PERIOD_MS 200
 #define MAX_PEERS      8
+#define LUA_ADDR_BASE  0xB0     // CRSF-Adresse = 0xB0 + Lua-Nr - 1 (Module: 0xC0 + Adresse)
+#define LUA_SLOT_MS    10       // Ping-Antwort nach (16 + Lua-Nr) * 10 ms, also nach den Modulen (Adresse 0..15)
+#define LUA_PEER_LINES 4
 
 // ── Einstellungen (NVS) ───────────────────────────────────────────────
 struct Settings {
@@ -127,6 +141,7 @@ struct Settings {
     bool     ledRgb;       // LED-Reihenfolge RGB (S3-Zero) statt GRB
     bool     wifiOn;       // WLAN beim Start an
     char     name[17];     // frei waehlbarer Name, z. B. "Empfaenger"
+    uint8_t  luaNr;        // v0.3.0: Nr im Lua-Menue 1..8, 0 = automatisch
 };
 static Settings cfg;
 static Preferences prefs;
@@ -142,7 +157,9 @@ static void loadSettings() {
     cfg.wifiOn     = prefs.getBool("wifi", true);
     String n       = prefs.getString("name", "");
     strlcpy(cfg.name, n.c_str(), sizeof(cfg.name));
+    cfg.luaNr      = prefs.getUChar("luanr", 0);
     prefs.end();
+    if (cfg.luaNr > 8) cfg.luaNr = 0;
     if (cfg.group == 0) cfg.group = 1;
     if (cfg.channel < 1 || cfg.channel > 13) cfg.channel = 1;
     if (cfg.txPower < 2 || cfg.txPower > 20) cfg.txPower = 8;
@@ -158,6 +175,7 @@ static void saveSettings() {
     prefs.putBool ("ledrgb2", cfg.ledRgb);
     prefs.putBool ("wifi",  cfg.wifiOn);
     prefs.putString("name", cfg.name);
+    prefs.putUChar("luanr", cfg.luaNr);
     prefs.end();
 }
 
@@ -288,7 +306,190 @@ static void radioSendFrame(const uint8_t* f, uint8_t flen) {
     sendData(pkt, sizeof(PktHdr) + flen);
 }
 
+// ── Eigenes Lua-Menue (v0.3.0) ────────────────────────────────────────
+// Der Link meldet sich als eigenes Geraet am Sender. Anfragen an die eigene
+// Adresse beantwortet er auf dem Weg, auf dem sie kamen (Kabel oder Funk),
+// und gibt sie nicht weiter. Pings an alle gehen weiter wie bisher, die
+// eigene Antwort kommt zeitversetzt dazu.
+static bool wifiApOn = false;
+static char apName[32];
+static int8_t wifiRequest = -1;          // aus dem Lua: WLAN an/aus, ausgefuehrt in loop()
+static CRSF crsf;
+static constexpr uint8_t LUA_COUNT = 19;
+static LuaItem luaItems[LUA_COUNT + 1];
+static LuaMenu luaMenu(luaItems, LUA_COUNT + 1);
+static bool luaReplyRadio = false;       // Antwort ueber Funk statt Kabel
+static bool luaPingPending = false, luaPingRadio = false;
+static uint8_t luaPingSource = 0xEA;
+static uint32_t luaPingMs = 0, luaDupMs = 0;
+static uint32_t luaReplies = 0;          // gesendete Lua-Antworten gesamt (WebUI)
+
+static bool atReceiver() { return lastRcUartMs && millis() - lastRcUartMs <= 1000; }
+static uint8_t luaNr()   { return cfg.luaNr ? cfg.luaNr : (atReceiver() ? 1 : 2); }
+static uint8_t luaAddr() { return LUA_ADDR_BASE + luaNr() - 1; }
+static bool luaDup()     { return luaDupMs && millis() - luaDupMs < 5000; }
+
+static void luaOut(const uint8_t* f, uint8_t n) {
+    luaReplies++;
+    if (luaReplyRadio) radioSendFrame(f, n);
+    else Serial1.write(f, n);
+}
+
+static const char* roleTextPlain() {
+    uint32_t now = millis();
+    if (lastRcUartMs  && now - lastRcUartMs  <= 1000) return "am Empfaenger";
+    if (lastRcRadioMs && now - lastRcRadioMs <= 1000) return "am Modul";
+    return "ohne Kanaele";
+}
+
+static bool peerAlive(const Peer& p) { return p.used && p.lastAnyMs && millis() - p.lastAnyMs <= LINK_TIMEOUT_MS; }
+static uint8_t alivePeers() { uint8_t n = 0; for (auto& p : peers) if (peerAlive(p)) n++; return n; }
+static float peerLossPct(const Peer& p) { uint32_t t = p.rx + p.lost; return t ? 100.0f * p.lost / t : 0; }
+// i-te benutzte Gegenstelle (0..), nullptr wenn es so viele nicht gibt
+static const Peer* peerAt(uint8_t i) {
+    for (auto& p : peers) if (p.used && i-- == 0) return &p;
+    return nullptr;
+}
+
+static const uint8_t RATE_VALUES[] = {0, 5, 10, 20, 50};
+static const uint8_t PWR_VALUES[]  = {2, 5, 8, 11, 15, 20};
+
+static uint8_t luaGetPwr(uint8_t) { uint8_t i = 0; while (i < 5 && PWR_VALUES[i + 1] <= cfg.txPower) i++; return i; }
+static void luaSetPwr(uint8_t, uint8_t v) {
+    cfg.txPower = PWR_VALUES[v < 6 ? v : 5];
+    esp_wifi_set_max_tx_power(cfg.txPower * 4);   // wirkt sofort
+    saveSettings();
+}
+static uint8_t luaGetRate(uint8_t) { uint8_t i = 0; while (i < 4 && RATE_VALUES[i + 1] <= cfg.rcInterval) i++; return i; }
+static void luaSetRate(uint8_t, uint8_t v) { cfg.rcInterval = RATE_VALUES[v < 5 ? v : 4]; saveSettings(); }
+static uint8_t luaGetWifiNow(uint8_t)  { return wifiApOn ? 1 : 0; }
+static void luaSetWifiNow(uint8_t, uint8_t v) { wifiRequest = v ? 1 : 0; }   // nicht im CRSF-Handler starten
+static uint8_t luaGetWifiPerm(uint8_t) { return cfg.wifiOn ? 1 : 0; }
+static void luaSetWifiPerm(uint8_t, uint8_t v) { cfg.wifiOn = (v != 0); saveSettings(); }
+static uint8_t luaGetLed(uint8_t)      { return cfg.ledRgb ? 0 : 1; }
+static void luaSetLed(uint8_t, uint8_t v) { cfg.ledRgb = (v == 0); saveSettings(); }
+
+static void luaViewFunkFolder(uint8_t, LuaView& v, char* buf) {
+    uint8_t n = alivePeers();
+    if (n) snprintf(buf, LUA_VIEW_BUF, "Funk (verbunden, %u Geg.)", (unsigned)n);
+    else   snprintf(buf, LUA_VIEW_BUF, "Funk (keine Verbindung)");
+    v.name = buf;
+}
+static void luaViewRole(uint8_t, LuaView& v, char*)  { v.text = roleTextPlain(); }
+static void luaViewGroup(uint8_t, LuaView& v, char* buf) { snprintf(buf, LUA_VIEW_BUF, "%u (WebUI)", (unsigned)cfg.group); v.text = buf; }
+static void luaViewChan(uint8_t, LuaView& v, char* buf)  { snprintf(buf, LUA_VIEW_BUF, "%u (WebUI)", (unsigned)cfg.channel); v.text = buf; }
+static void luaViewRate(uint8_t, LuaView& v, char*)  { if (!atReceiver()) v.hidden = true; }
+static void luaViewConn(uint8_t, LuaView& v, char* buf) {
+    float loss = 0; int rssi = 0; uint8_t n = 0;
+    for (auto& p : peers) if (peerAlive(p)) {
+        n++;
+        float l = peerLossPct(p);
+        if (l > loss) loss = l;
+        if (n == 1 || p.rssi < rssi) rssi = p.rssi;
+    }
+    if (!n) { v.text = "keine Gegenstelle"; return; }
+    snprintf(buf, LUA_VIEW_BUF, "%u Geg., %.1f%% Verl., %d dBm", (unsigned)n, loss, rssi);
+    v.text = buf;
+}
+static void luaViewPeerFolder(uint8_t, LuaView& v, char* buf) {
+    uint8_t n = 0;
+    for (auto& p : peers) if (p.used) n++;
+    snprintf(buf, LUA_VIEW_BUF, "Gegenstellen (%u)", (unsigned)n);
+    v.name = buf;
+}
+// Name und Text teilen sich buf: Name vorne, Text ab Byte 20
+static void luaViewPeer(uint8_t i, LuaView& v, char* buf) {
+    const Peer* p = peerAt(i);
+    if (!p) { v.hidden = true; return; }
+    if (p->name[0]) snprintf(buf, 18, "%s", p->name);
+    else            snprintf(buf, 18, "%02X:%02X", p->mac[4], p->mac[5]);
+    if (peerAlive(*p)) snprintf(buf + 20, LUA_VIEW_BUF - 20, "%.1f%% %d dBm", peerLossPct(*p), (int)p->rssi);
+    else               snprintf(buf + 20, LUA_VIEW_BUF - 20, "weg");
+    v.name = buf; v.text = buf + 20;
+}
+static void luaViewNr(uint8_t, LuaView& v, char* buf) {
+    snprintf(buf, LUA_VIEW_BUF, "%u%s%s", (unsigned)luaNr(), cfg.luaNr ? "" : " (auto)", luaDup() ? " DOPPELT!" : "");
+    v.text = buf;
+}
+static void luaHideAlways(uint8_t, LuaView& v, char*) { v.hidden = true; }
+
+static void buildLuaMenu() {
+    LuaMenu& m = luaMenu;
+    m.clear();
+    m.folder(0, 0, "");
+    m.info(1, 0, "Version", "v" FW_VERSION " " BOARD_NAME);
+    m.folder(2, 0, "Funk")->view = luaViewFunkFolder;
+    m.info(3, 2, "Rolle", "")->view = luaViewRole;
+    m.info(4, 2, "Kennung", "")->view = luaViewGroup;
+    m.info(5, 2, "Kanal", "")->view = luaViewChan;
+    m.select(6, 2, "Leistung", "2 dBm;5 dBm;8 dBm;11 dBm;15 dBm;20 dBm", luaGetPwr, luaSetPwr);
+    m.select(7, 2, "Kanaele alle", "jedes Frame;5 ms;10 ms;20 ms;50 ms", luaGetRate, luaSetRate)->view = luaViewRate;
+    m.info(8, 2, "Verbindung", "")->view = luaViewConn;
+    m.folder(9, 0, "Gegenstellen")->view = luaViewPeerFolder;
+    for (uint8_t i = 0; i < LUA_PEER_LINES; i++) {
+        LuaItem* it = m.info(10 + i, 9, "Gegenstelle", "");
+        it->arg = i;
+        it->view = luaViewPeer;
+    }
+    m.folder(14, 0, "WLAN");
+    m.select(15, 14, "WLAN jetzt", "Aus;Ein", luaGetWifiNow, luaSetWifiNow);
+    m.select(16, 14, "Dauerhaft an", "Aus;Ein", luaGetWifiPerm, luaSetWifiPerm);
+    m.folder(17, 0, "Global");
+#if LED_WS2812
+    m.select(18, 17, "LED Farbfolge", "RGB (S3-Zero);GRB", luaGetLed, luaSetLed);
+#else
+    m.info(18, 17, "LED Farbfolge", "keine RGB-LED")->view = luaHideAlways;
+#endif
+    m.info(19, 17, "Lua-Nr (WebUI)", "")->view = luaViewNr;
+}
+
+// Erweitertes Frame (Typ >= 0x28: [Sync][Len][Typ][Ziel][Absender]...).
+// true = Frame war fuer diesen Link und wird nicht weitergegeben.
+static bool luaHandleFrame(const uint8_t* f, uint8_t flen, bool fromRadio) {
+    if (flen < 6 || f[2] < 0x28) return false;   // Ping = 6 Byte
+    uint8_t type = f[2], dest = f[3], src = f[4], me = luaAddr();
+    // Anderes Geraet mit unserer Adresse (zweiter Link mit gleicher Lua-Nr)
+    if (type == 0x29 && src == me) { luaDupMs = millis(); if (!luaDupMs) luaDupMs = 1; return false; }
+    if (type == 0x28) {                       // DEVICE_PING
+        if (dest == 0x00 || dest == me) {
+            luaPingPending = true; luaPingRadio = fromRadio;
+            luaPingSource = src; luaPingMs = millis();
+        }
+        return dest == me;
+    }
+    if (dest != me) return false;
+    if (type == 0x2C && flen >= 8) {          // PARAMETER_READ [id][chunk]
+        luaReplyRadio = fromRadio;
+        crsf.setDeviceAddress(me);
+        crsf.setRequest(src, f[1] >= 6 ? f[6] : 0);
+        luaMenu.send(crsf, f[5]);
+        return true;
+    }
+    if (type == 0x2D && flen >= 8) {          // PARAMETER_WRITE [id][wert]
+        luaReplyRadio = fromRadio;
+        crsf.setDeviceAddress(me);
+        luaMenu.write(f[5], f[6]);
+        crsf.setRequest(src, 0);
+        luaMenu.send(crsf, f[5]);
+        return true;
+    }
+    return true;                              // andere Frames an uns: schlucken
+}
+
+// in loop(): Ping-Antwort im eigenen Zeitfenster (nach den Modulen 0..15)
+static void luaPoll() {
+    if (!luaPingPending) return;
+    uint8_t nr = luaNr();
+    if (millis() - luaPingMs < (uint32_t)(16 + nr) * LUA_SLOT_MS) return;
+    luaPingPending = false;
+    luaReplyRadio = luaPingRadio;
+    crsf.setDeviceAddress(luaAddr());
+    crsf.setRequest(luaPingSource, 0);
+    crsf.send_device_info(apName, luaMenu.maxId(), FW_PARAM_VERSION);
+}
+
 static void onUartFrame(const uint8_t* f, uint8_t flen) {
+    if (luaHandleFrame(f, flen, false)) return;   // v0.3.0: Anfrage an diesen Link
     cnt.uartIn++;
     if (f[2] != 0x16) cnt.otherIn++;
     if (f[2] == 0x16) {                        // RC Channels Packed
@@ -377,6 +578,7 @@ static void handleRadio(const RxItem& it) {
         cnt.dataRx++;
         if (blen < 4 || blen > 64 || body[1] + 2 != blen) { cnt.lenErr++; break; }
         if (crc8_d5(body + 2, body[1] - 1) != body[blen - 1]) { cnt.crcErr++; cnt.crcRadio++; break; }
+        if (luaHandleFrame(body, (uint8_t)blen, true)) break;   // v0.3.0: Anfrage an diesen Link
         // Rueckstau: liegen schon neuere Pakete in der Warteschlange, ist
         // dieses Kanal-Frame veraltet -> nicht mehr aufs Kabel (sonst
         // laeuft die Verzoegerung auf). Andere Frames (Lua, Telemetrie)
@@ -443,9 +645,6 @@ static void onSent(const uint8_t* mac, esp_now_send_status_t st) {
 }
 
 // ── Funk starten ──────────────────────────────────────────────────────
-static bool wifiApOn = false;
-static char apName[32];
-
 static void radioBegin() {
     WiFi.mode(WIFI_STA);               // STA-Schnittstelle fuer ESP-NOW (ohne Anmelden)
     WiFi.setSleep(false);              // kein Stromsparen = kurze Laufzeit
@@ -495,7 +694,15 @@ button{margin-top:12px;font-size:16px;padding:8px 14px;border:0;border-radius:6p
 <label>Kan&auml;le h&ouml;chstens alle ... ms funken (0 = jedes Frame)<input name="rcint" type="number" min="0" max="50"></label>
 <label>LED-Reihenfolge<select name="ledrgb"><option value="1">RGB (S3-Zero)</option><option value="0">GRB</option></select></label>
 <label>WLAN beim Start<select name="wifi"><option value="1">an</option><option value="0">aus (BOOT 2 s = an)</option></select></label>
+<label>Nr im Lua-Men&uuml; des Senders (jeder Link eine eigene)<select name="luanr"><option value="0">automatisch (am Empf&auml;nger 1, am Modul 2)</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option></select></label>
 <button>Speichern</button></form></div>
+<div class="card"><b>Einstellungen sichern</b> <small>(Datei auf dem Handy/PC)</small><br>
+<button type="button" id="exp">Exportieren</button> <button type="button" id="impb">Importieren</button><input type="file" id="imp" accept=".json,application/json" style="display:none">
+<div><small id="impst"></small></div></div>
+<div class="card"><b>Firmware-Update</b> <small>(Datei <code>..._ota.bin</code> aus GitHub Actions; Einstellungen bleiben erhalten)</small>
+<label>Firmware-Datei<input type="file" id="ota" accept=".bin"></label>
+<button type="button" id="otab">Update starten</button> <small id="otast"></small>
+<div><small>W&auml;hrend des Updates ist die Funkstrecke unterbrochen, die Module gehen in Failsafe. Strom nicht trennen.</small></div></div>
 <script>
 const $=id=>document.getElementById(id);
 function row(a,b){return '<tr><th>'+a+'</th><td>'+b+'</td></tr>'}
@@ -504,13 +711,30 @@ $('ver').textContent='v'+s.ver;$('nm').textContent=s.name||'ESP-NOW-CRSF-Link';$
 $('st').innerHTML=s.link?'<span class="ok">Funk-Verbindung da</span>':'<span class="bad">keine Funk-Verbindung</span>';
 $('own').innerHTML=row('Kanal-Frames vom Kabel /s',s.rcUart)+row('Kanal-Frames aus Funk /s',s.rcRadio)+
 row('Frames Kabel → Funk /s',s.uartIn)+row('Frames Funk → Kabel /s',s.uartOut)+row('Gesendete Pakete /s',s.tx)+
-row('CRC-Fehler gesamt',s.crcErr)+row('Sendefehler gesamt',s.sendErr)+row('Nicht zugestellt (keine Quittung) gesamt',s.noAck)+row('Warteschlange voll gesamt',s.qFull)+row('Veraltete Kanal-Frames verworfen',s.stale)+row('Datenpakete aus Funk gesamt',s.dataRx)+row('davon Länge falsch / CRC falsch',s.lenErr+' / '+s.crcRadio)+row('Antworten Funk → Kabel gesamt (ohne Kanäle)',s.otherOut+(s.otherOut?' (zuletzt Typ 0x'+s.lastType.toString(16).toUpperCase()+', '+s.lastLen+' Byte)':''))+row('Anfragen Kabel → Funk gesamt (ohne Kanäle)',s.otherIn)+row('Laufzeit',s.up+' s');
+row('CRC-Fehler gesamt',s.crcErr)+row('Sendefehler gesamt',s.sendErr)+row('Nicht zugestellt (keine Quittung) gesamt',s.noAck)+row('Warteschlange voll gesamt',s.qFull)+row('Veraltete Kanal-Frames verworfen',s.stale)+row('Datenpakete aus Funk gesamt',s.dataRx)+row('davon Länge falsch / CRC falsch',s.lenErr+' / '+s.crcRadio)+row('Antworten Funk → Kabel gesamt (ohne Kanäle)',s.otherOut+(s.otherOut?' (zuletzt Typ 0x'+s.lastType.toString(16).toUpperCase()+', '+s.lastLen+' Byte)':''))+row('Anfragen Kabel → Funk gesamt (ohne Kanäle)',s.otherIn)+row('Lua-Men&uuml; am Sender','Nr '+s.luaNr+' (Adresse 0x'+s.luaAddr.toString(16).toUpperCase()+')'+(s.luaDup?' <span class="bad">Nr doppelt vergeben!</span>':'')+', Antworten '+s.luaTx)+row('Laufzeit',s.up+' s');
 let h='<tr><th>Gegenstelle</th><th>Pakete/s</th><th>verloren</th><th>Aussetzer &gt;200ms</th><th>l&auml;ngste L&uuml;cke</th><th>Laufzeit (eine Richtung)</th><th>RSSI</th></tr>';
 for(const p of s.peers){h+='<tr><td>'+(p.name?'<b>'+p.name+'</b> ':'')+p.mac.slice(-5)+(p.alive?'':' <span class="bad">weg</span>')+'</td><td>'+p.rx+'</td><td>'+p.lost+' ('+p.lossPct+' %)</td><td>'+p.drop+
 '</td><td>'+p.gapSec+' / '+p.maxGap+' ms</td><td>'+(p.rtt/2000).toFixed(2)+' ms (max '+(p.rttMax/2000).toFixed(2)+')</td><td>'+p.rssi+' dBm</td></tr>'}
 $('peers').innerHTML=s.peers.length?h:'<tr><td>noch keine Gegenstelle empfangen</td></tr>';}catch(e){}}
 async function loadCfg(){const c=await (await fetch('/api/config')).json();const f=$('f');for(const k in c)if(f[k])f[k].value=c[k];}
 $('f').onsubmit=async e=>{e.preventDefault();await fetch('/api/config',{method:'POST',body:new URLSearchParams(new FormData($('f')))});alert('Gespeichert, Neustart ...');};
+$('exp').onclick=async()=>{const c=await (await fetch('/api/config')).json();const s=await (await fetch('/api/stats')).json();
+const d={geraet:'ESP-NOW-CRSF-Link',version:s.ver,board:s.board,datum:new Date().toISOString().slice(0,16),config:c};
+const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(d,null,1)],{type:'application/json'}));
+a.download='CRSF-Link-'+(c.name||s.mac.slice(-5).replace(':',''))+'.json';document.body.appendChild(a);a.click();a.remove();};
+$('impb').onclick=()=>$('imp').click();
+$('imp').onchange=e=>{const fl=e.target.files[0];if(!fl)return;const r=new FileReader();r.onload=()=>{try{const d=JSON.parse(r.result);
+if(d.geraet!=='ESP-NOW-CRSF-Link'||!d.config)throw 0;const f=$('f');for(const k in d.config)if(f[k])f[k].value=d.config[k];
+$('impst').textContent='Werte aus "'+fl.name+'" eingetragen. Pr\u00fcfen (Name!) und mit Speichern \u00fcbernehmen.';f.scrollIntoView();}
+catch(x){$('impst').textContent='Keine Einstellungs-Datei eines CRSF-Links.';}$('imp').value='';};r.readAsText(fl);};
+$('otab').onclick=()=>{const fl=$('ota').files[0],st=t=>$('otast').textContent=t;if(!fl){st('Erst eine .bin-Datei w\u00e4hlen.');return;}
+if(!confirm('Firmware-Update mit "'+fl.name+'" starten? Strom w\u00e4hrend des Uploads nicht trennen.'))return;
+const fd=new FormData();fd.append('file',fl,fl.name);const x=new XMLHttpRequest();x.open('POST','/api/otaupdate',true);
+x.upload.onprogress=e=>{if(e.lengthComputable)st('Hochladen ... '+Math.round(e.loaded/e.total*100)+' %');};
+x.onload=()=>{let d=null;try{d=JSON.parse(x.responseText)}catch(e){}
+const m={update_begin:'Update konnte nicht starten',bad_file:'keine Firmware-Datei (die _ota.bin nehmen, nicht _komplett.bin)',flash_write:'Schreiben fehlgeschlagen',aborted:'Upload abgebrochen',update_end:'Datei unvollst\u00e4ndig oder f\u00fcr einen anderen Chip'};
+st(d&&d.ok?'Update erfolgreich, Link startet neu ...':'Fehler: '+(d?(m[d.error]||d.error):'keine Antwort'));};
+x.onerror=()=>st('Verbindung unterbrochen. Update war vielleicht trotzdem erfolgreich, neu verbinden und Version pr\u00fcfen.');x.send(fd);};
 loadCfg();load();setInterval(load,1000);
 </script></body></html>)HTML";
 
@@ -532,6 +756,7 @@ static void handleStats() {
     j += ",\"dataRx\":" + String(cnt.dataRx) + ",\"crcRadio\":" + String(cnt.crcRadio) + ",\"lenErr\":" + String(cnt.lenErr);
     j += ",\"otherIn\":" + String(cnt.otherIn) + ",\"otherOut\":" + String(cnt.otherOut);
     j += ",\"lastType\":" + String(lastOtherType) + ",\"lastLen\":" + String(lastOtherLen);
+    j += ",\"luaNr\":" + String(luaNr()) + ",\"luaAddr\":" + String(luaAddr()) + ",\"luaDup\":" + String(luaDup() ? "true" : "false") + ",\"luaTx\":" + String(luaReplies);
     j += ",\"up\":" + String(upSec) + ",\"peers\":[";
     bool first = true;
     for (auto& p : peers) {
@@ -552,7 +777,7 @@ static void handleStats() {
 static void handleConfigGet() {
     String j = "{\"group\":" + String(cfg.group) + ",\"chan\":" + String(cfg.channel) + ",\"txp\":" + String(cfg.txPower) +
                ",\"baud\":" + String(cfg.baud) + ",\"rcint\":" + String(cfg.rcInterval) +
-               ",\"ledrgb\":" + String(cfg.ledRgb ? 1 : 0) + ",\"wifi\":" + String(cfg.wifiOn ? 1 : 0) + ",\"name\":\"" + String(cfg.name) + "\"}";
+               ",\"ledrgb\":" + String(cfg.ledRgb ? 1 : 0) + ",\"wifi\":" + String(cfg.wifiOn ? 1 : 0) + ",\"name\":\"" + String(cfg.name) + "\",\"luanr\":" + String(cfg.luaNr) + "}";
     web.send(200, "application/json", j);
 }
 
@@ -564,6 +789,7 @@ static void handleConfigPost() {
     if (web.hasArg("rcint")) cfg.rcInterval = constrain(web.arg("rcint").toInt(), 0, 50);
     if (web.hasArg("ledrgb")) cfg.ledRgb    = web.arg("ledrgb").toInt() != 0;
     if (web.hasArg("wifi"))  cfg.wifiOn     = web.arg("wifi").toInt() != 0;
+    if (web.hasArg("luanr")) cfg.luaNr      = constrain(web.arg("luanr").toInt(), 0, 8);
     if (web.hasArg("name")) {
         // nur einfache Zeichen (JSON, WLAN-Name): Buchstaben, Ziffern, Leer, - _
         String in = web.arg("name"), out;
@@ -577,6 +803,48 @@ static void handleConfigPost() {
     saveSettings();
     web.send(200, "text/plain", "ok");
     delay(300);
+    ESP.restart();
+}
+
+// ── Firmware-Update per WLAN (v0.3.0, wie RC_Common web_common) ───────
+// otaData() laeuft mehrfach waehrend des Uploads, otaDone() einmal danach.
+static bool otaFailed = false, otaStarted = false;
+static String otaErr;
+static uint32_t otaBytes = 0;
+
+static void otaData() {
+    HTTPUpload& up = web.upload();
+    if (up.status == UPLOAD_FILE_START) {
+        otaFailed = false; otaStarted = false; otaErr = ""; otaBytes = 0;
+        Serial.printf("[OTA] Start: %s\n", up.filename.c_str());
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { otaFailed = true; otaErr = "update_begin"; return; }
+        otaStarted = true;
+    } else if (up.status == UPLOAD_FILE_WRITE) {
+        if (otaFailed || !otaStarted) return;
+        // Jede ESP32-Firmware beginnt mit 0xE9 (faengt das Komplett-Image ab 0x0 ab)
+        if (otaBytes == 0 && up.currentSize > 0 && up.buf[0] != 0xE9) { otaFailed = true; otaErr = "bad_file"; return; }
+        size_t w = Update.write(up.buf, up.currentSize);
+        otaBytes += w;
+        if (w != up.currentSize) { otaFailed = true; otaErr = "flash_write"; }
+    } else if (up.status == UPLOAD_FILE_END || up.status == UPLOAD_FILE_ABORTED) {
+        if (up.status == UPLOAD_FILE_ABORTED) { otaFailed = true; otaErr = "aborted"; }
+        if (otaStarted) {
+            if (otaFailed) Update.abort();
+            else if (!Update.end(true)) { otaFailed = true; otaErr = "update_end"; }
+            else Serial.printf("[OTA] Fertig: %u Bytes\n", (unsigned)otaBytes);
+        }
+    }
+}
+
+static void otaDone() {
+    web.sendHeader("Cache-Control", "no-cache");
+    if (otaFailed || !otaStarted) {
+        web.send(200, "application/json", "{\"ok\":false,\"error\":\"" + (otaErr.length() ? otaErr : String("update_begin")) + "\"}");
+        return;
+    }
+    web.send(200, "application/json", "{\"ok\":true,\"size\":" + String(otaBytes) + "}");
+    web.client().flush();
+    delay(500);
     ESP.restart();
 }
 
@@ -700,6 +968,9 @@ void setup() {
     web.on("/api/stats", handleStats);
     web.on("/api/config", HTTP_GET, handleConfigGet);
     web.on("/api/config", HTTP_POST, handleConfigPost);
+    web.on("/api/otaupdate", HTTP_POST, otaDone, otaData);
+    crsf.setOut(luaOut);
+    buildLuaMenu();
     if (cfg.wifiOn) wifiApSet(true);
 
     Serial.printf("\nESP-NOW-CRSF-Link v%s (%s), MAC %s\n", FW_VERSION, BOARD_NAME, macStr(myMac).c_str());
@@ -724,6 +995,8 @@ void loop() {
         else if (bootDown != 1 && now - bootDown >= BOOT_HOLD_MS) { wifiApSet(!wifiApOn); bootDown = 1; }
     } else bootDown = 0;
 
+    luaPoll();
+    if (wifiRequest >= 0) { wifiApSet(wifiRequest == 1); wifiRequest = -1; }
     if (wifiApOn) web.handleClient();
     updateLed();
 }

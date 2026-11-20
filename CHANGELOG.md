@@ -2,6 +2,15 @@
 
 Bis v0.1.9 „Funk-Brücke“, Prüfstand im Repo RC-CRSF-Router-ESP32-S3 (`pruefstand/Funk_Bruecke/`). Neueste Version oben.
 
+## v0.3.0
+- Eigenes Lua-Menü am Sender: der Link erscheint als eigenes Gerät („CRSF-Link-XXXX“ bzw. „Link-<Name>“) mit den Ordnern Funk (Rolle, Kennung, Kanal, Leistung, Kanäle alle, Verbindung), Gegenstellen (bis 4, Name, Verlust, RSSI), WLAN (jetzt an, dauerhaft an) und Global (LED Farbfolge, Lua-Nr).
+- Kennung und Funkkanal sind im Lua nur Anzeige (ändern nur in der WebUI), damit sich ein Link hinter der Funkstrecke nicht selbst aussperrt. Leistung und „Kanäle alle“ wirken sofort.
+- Eigene CRSF-Adresse 0xB0 + Lua-Nr − 1. Lua-Nr automatisch (am Empfänger 1, am Modul 2) oder fest 1–8 in der WebUI. Doppelte Nr wird erkannt und angezeigt.
+- Anfragen an die eigene Adresse beantwortet der Link auf dem Weg, auf dem sie kamen, und gibt sie nicht weiter. Pings an alle gehen weiter, die eigene Antwort kommt zeitversetzt nach den Modulen.
+- Firmware-Update per WLAN (OTA) in der WebUI.
+- Einstellungen als Datei exportieren und importieren (Import trägt die Werte ins Formular ein, Speichern übernimmt sie).
+- Lua-Technik: `lua_menu.*` aus RC_Common 1.5.2 (Kopie), dazu `link_crsf.*` als schlanker Ersatz für CRSF_ESP32. Prüfstand zeigt jetzt auch das Lua-Menü.
+
 ## v0.2.1
 - Hardware-Test 19.11.2026 bestanden: am Empfänger mit Multiswitch S3 v5.04 als Teilnehmer. Kanäle, Lua-Menü und WM-Befehle laufen über Funk.
 - Fehlersuche Rückweg: Status zeigt Gesamtzähler „Datenpakete aus Funk“, „Länge falsch / CRC falsch“, „Antworten Funk → Kabel (ohne Kanäle)“ mit Typ und Länge des letzten Frames, „Anfragen Kabel → Funk (ohne Kanäle)“.

@@ -2,7 +2,7 @@
 
 CRSF per Funk statt Kabel: zwei kleine ESP32 ersetzen die CRSF-Leitung zwischen ELRS-Empfänger und einem Modul (Multiswitch, Soundmodul, CRSF-Router …). Übertragen wird mit **ESP-NOW** direkt zwischen den ESP32, ohne WLAN-Router.
 
-Autor: PiperPilot · Version 0.2.0 · bis v0.1.9 hieß das Projekt „Funk-Brücke“ (Prüfstand im Repo RC-CRSF-Router-ESP32-S3). v0.1.9 ist am 19.11.2026 auf Hardware getestet: 0,2 % Verlust, Lua-Menü und Failsafe OK.
+Autor: PiperPilot · Version 0.3.0 · bis v0.1.9 hieß das Projekt „Funk-Brücke“ (Prüfstand im Repo RC-CRSF-Router-ESP32-S3). v0.1.9 ist am 19.11.2026 auf Hardware getestet: 0,2 % Verlust, Lua-Menü und Failsafe OK.
 
 ```
 ELRS-Empfänger --Kabel--> Link 1  ~~ ESP-NOW ~~>  Link 2 --Kabel--> Modul
@@ -51,7 +51,7 @@ Im Ping meldet sich der Link ab v0.2.0 als „Brücke“, die Module zeigen ihn 
 GitHub baut die Dateien bei jedem Push: Reiter **Actions** → „Firmware bauen“ → neuester Lauf → unten bei **Artifacts** `esp-now-crsf-link-s3`, `-c3` oder `-esp32`.
 
 - `ESP32_ESP-NOW_CRSF-Link_xx_komplett.bin` per USB ab Adresse **0x0** flashen (z. B. mit dem Espressif Web-Flasher).
-- `ESP32_ESP-NOW_CRSF-Link_xx_ota.bin` ist für ein späteres Update.
+- `ESP32_ESP-NOW_CRSF-Link_xx_ota.bin` ist für ein späteres Update per WLAN: WebUI → „Firmware-Update“ (ab v0.3.0). Die Einstellungen bleiben erhalten.
 - Arduino IDE: `firmware/ESP32_ESP-NOW_CRSF-Link/ESP32_ESP-NOW_CRSF-Link.ino` öffnen. Board „ESP32S3 Dev Module“, „ESP32C3 Dev Module“ (beide USB CDC On Boot **an**) oder „ESP32 Dev Module“. esp32-Core 3.x, keine weiteren Bibliotheken.
 
 Ein Update von der Funk-Brücke v0.1.x behält alle Einstellungen.
@@ -70,7 +70,22 @@ Ein Update von der Funk-Brücke v0.1.x behält alle Einstellungen.
 
 Sind Rot und Grün vertauscht, in der WebUI „LED-Reihenfolge“ umstellen (Standard GRB).
 
-**Einstellungen** (auf allen Teilen gleich): Fahrzeug-Kennung 1–255 (Standard 1), Funkkanal 1–13 (Standard 1), Sendeleistung 2–20 dBm (Standard 8, im Modell besser 20), CRSF-Baudrate (Standard 420000), „Kanäle höchstens alle … ms“ (Standard 0 = jedes Frame), Name, LED-Reihenfolge, WLAN beim Start.
+**Einstellungen sichern:** WebUI → „Exportieren“ speichert eine Datei, „Importieren“ trägt die Werte ins Formular ein (Name prüfen, dann Speichern). Praktisch, um einen zweiten Link gleich einzustellen.
+
+### Lua-Menü am Sender (ab v0.3.0)
+
+Jeder Link erscheint im ELRS-Lua als eigenes Gerät:
+
+| Ordner | Inhalt |
+|---|---|
+| Funk | Rolle, Kennung und Kanal (nur Anzeige), Leistung, Kanäle alle (nur am Empfänger), Verbindung |
+| Gegenstellen | bis 4 Zeilen: Name, Verlust, RSSI |
+| WLAN | WLAN jetzt an/aus, dauerhaft an |
+| Global | LED Farbfolge, Lua-Nr |
+
+Kennung und Funkkanal lassen sich nur in der WebUI ändern: ein Link hinter der Funkstrecke wäre nach einer Änderung sofort nicht mehr erreichbar. Die CRSF-Adresse ist 0xB0 + Lua-Nr − 1. „Automatisch“ gibt am Empfänger Nr 1 und am Modul Nr 2. Hängen mehrere Links an Modulen, in der WebUI feste Nummern vergeben.
+
+**Einstellungen** (auf allen Teilen gleich): Fahrzeug-Kennung 1–255 (Standard 1), Funkkanal 1–13 (Standard 1), Sendeleistung 2–20 dBm (Standard 8, im Modell besser 20), CRSF-Baudrate (Standard 420000), „Kanäle höchstens alle … ms“ (Standard 0 = jedes Frame), Name, LED-Reihenfolge, WLAN beim Start, Nr im Lua-Menü (Standard automatisch).
 
 ## Testablauf
 

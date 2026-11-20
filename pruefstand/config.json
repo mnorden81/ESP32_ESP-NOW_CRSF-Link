@@ -5,22 +5,66 @@
       "id": "link",
       "name": "ESP-NOW-CRSF-Link",
       "dir": "firmware/ESP32_ESP-NOW_CRSF-Link",
-      "page": {"file": "ESP32_ESP-NOW_CRSF-Link.ino", "var": "PAGE"},
+      "page": {
+        "file": "ESP32_ESP-NOW_CRSF-Link.ino",
+        "var": "PAGE"
+      },
       "mock": "mock_link.js",
       "version": "FW_VERSION",
-      "const_files": ["*.h", "*.ino"],
+      "const_files": [
+        "*.h",
+        "*.ino"
+      ],
       "api": {
         "GET /api/stats": "handleStats",
         "GET /api/config": "handleConfigGet"
       },
-      "api_files": ["*.h", "*.ino"],
-      "api_init": ["loadSettings"],
-      "export": ["BOARD_NAME", "PIN_CRSF_RX", "PIN_CRSF_TX", "PIN_LED", "LED_WS2812", "PIN_BOOT"],
+      "api_files": [
+        "*.h",
+        "*.ino"
+      ],
+      "api_init": [
+        "loadSettings"
+      ],
+      "export": [
+        "BOARD_NAME",
+        "PIN_CRSF_RX",
+        "PIN_CRSF_TX",
+        "PIN_LED",
+        "LED_WS2812",
+        "PIN_BOOT"
+      ],
       "variants": [
-        {"id": "s3", "name": "ESP32-S3 Zero", "defines": {"CONFIG_IDF_TARGET_ESP32S3": "1"}},
-        {"id": "c3", "name": "ESP32-C3", "defines": {"CONFIG_IDF_TARGET_ESP32C3": "1"}},
-        {"id": "esp32", "name": "ESP32 DevKit", "defines": {"CONFIG_IDF_TARGET_ESP32": "1"}}
-      ]
+        {
+          "id": "s3",
+          "name": "ESP32-S3 Zero",
+          "defines": {
+            "CONFIG_IDF_TARGET_ESP32S3": "1"
+          }
+        },
+        {
+          "id": "c3",
+          "name": "ESP32-C3",
+          "defines": {
+            "CONFIG_IDF_TARGET_ESP32C3": "1"
+          }
+        },
+        {
+          "id": "esp32",
+          "name": "ESP32 DevKit",
+          "defines": {
+            "CONFIG_IDF_TARGET_ESP32": "1"
+          }
+        }
+      ],
+      "lua": {
+        "files": [
+          "*.h",
+          "*.cpp",
+          "*.ino"
+        ],
+        "expect_max": "LUA_COUNT"
+      }
     }
   ]
 }

@@ -101,3 +101,7 @@ Sind Rot und Grün vertauscht, in der WebUI „LED-Reihenfolge“ umstellen (Sta
 ## Verwandte Projekte
 
 RC-CRSF-Router-ESP32-S3, RC-Multiswitch-ESP32-C3/-S3, ESP32-Multiswitch-Basis_Ziege-One (alle mit RC_Common 1.5.0 `funk_link`).
+
+## Prüfstand (WebUI und Lua im Browser)
+
+In [`pruefstand/`](pruefstand/) liegt eine Seite, die die echte Weboberfläche und das Lua-Menü dieser Firmware im Browser zeigt (alle Varianten, Modul simuliert): [Prüfstand öffnen](https://raw.githack.com/mnorden81/ESP32_ESP-NOW_CRSF-Link/main/pruefstand/pruefstand.html). Sie wird bei jeder Firmware-Änderung neu gebaut, die GitHub-Prüfung „Prüfstand" achtet darauf.

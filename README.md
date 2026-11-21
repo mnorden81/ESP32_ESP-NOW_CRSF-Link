@@ -8,6 +8,12 @@ Autor: PiperPilot · Version 0.3.0 · bis v0.1.9 hieß das Projekt „Funk-Brüc
 ELRS-Empfänger --Kabel--> Link 1  ~~ ESP-NOW ~~>  Link 2 --Kabel--> Modul
 ```
 
+## Projektvideo
+
+[![Projektvideo: CRSF-Ökosystem für RC-Modelle (zum Abspielen anklicken)](https://github.com/mnorden81/RC-CRSF-Router-ESP32-S3/raw/main/docs/video/projektvideo-vorschau.jpg)](https://github.com/mnorden81/RC-CRSF-Router-ESP32-S3/blob/main/docs/video/CRSF-Oekosystem_Projektvorstellung.mp4)
+
+Rund zwei Minuten Überblick über das ganze CRSF-Ökosystem: CRSF-Router, Multiswitch, Soundmodule, der ESP-NOW-CRSF-Link mit Funk in den Modulen und die Prüfstände für WebUI und Lua-Menü. Bild anklicken, dann startet das Video auf GitHub. Das Video liegt im Repo [RC-CRSF-Router-ESP32-S3](https://github.com/mnorden81/RC-CRSF-Router-ESP32-S3/tree/main/docs/video), weil es alle Module gemeinsam zeigt.
+
 ## Funktionen
 
 - **Durchsichtig:** jedes gültige CRSF-Frame vom Kabel (CRC geprüft) wird gefunkt, jedes gefunkte Frame aufs Kabel geschrieben. Kanäle, Telemetrie und das Lua-Menü des Senders laufen ohne Änderung an den Modulen.
